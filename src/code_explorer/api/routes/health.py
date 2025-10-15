@@ -4,6 +4,7 @@ from typing import Any
 
 import structlog
 from fastapi import APIRouter
+from sqlalchemy import text
 
 from code_explorer.models.responses import HealthResponse, ReadinessResponse
 
@@ -44,7 +45,7 @@ async def readiness_check() -> ReadinessResponse:
 
         session_factory = get_session_factory()
         async with session_factory() as session:
-            await session.execute("SELECT 1")  # type: ignore[arg-type]
+            await session.execute(text("SELECT 1"))
         checks["database"] = "ok"
     except Exception as e:
         logger.warning("Database health check failed", error=str(e))

@@ -133,12 +133,17 @@ def setup_logging(settings: Settings | None = None) -> None:
         cache_logger_on_first_use=True,
     )
 
-    # Also configure standard logging to use structlog
+    # Configure standard logging
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,
         level=getattr(logging, settings.log_level),
     )
+
+    # Suppress uvicorn's default access logs (we have our own middleware)
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    # Keep uvicorn error logs but reduce noise
+    logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
 
 
 # =============================================================================
