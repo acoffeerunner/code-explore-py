@@ -89,9 +89,7 @@ class ChatService:
         await log.ainfo("Processing chat query")
 
         # Step 1: Verify ownership and get repo
-        result = await db.execute(
-            select(Repo).where(Repo.id == repo_id, Repo.user_id == user_id)
-        )
+        result = await db.execute(select(Repo).where(Repo.id == repo_id, Repo.user_id == user_id))
         repo = result.scalar_one_or_none()
 
         if not repo:
@@ -134,9 +132,7 @@ class ChatService:
 
         # Step 5: Fetch chunk content from Postgres
         chunk_ids = [UUID(m["id"]) for m in matches]
-        chunks_result = await db.execute(
-            select(Chunk).where(Chunk.id.in_(chunk_ids))
-        )
+        chunks_result = await db.execute(select(Chunk).where(Chunk.id.in_(chunk_ids)))
         db_chunks = {c.id: c for c in chunks_result.scalars().all()}
 
         # Build retrieved chunks with content
@@ -179,8 +175,7 @@ class ChatService:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.1,
-            max_tokens=2000,
+            max_completion_tokens=4000,
         )
 
         answer = response.choices[0].message.content or ""
