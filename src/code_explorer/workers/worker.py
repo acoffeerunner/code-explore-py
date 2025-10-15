@@ -59,44 +59,48 @@ class WorkerSettings:
     keep_result = 3600  # Keep results for 1 hour
     retry_jobs = True
 
-    @staticmethod
-    def redis_settings() -> RedisSettings:
-        """Get Redis settings from config."""
-        settings = get_settings()
-        # Parse redis URL
-        # Format: redis://[:password@]host[:port][/database]
-        url = settings.redis_url
-        if url.startswith("redis://"):
-            url = url[8:]
 
-        # Extract password if present
-        password = None
-        if "@" in url:
-            auth_part, url = url.split("@", 1)
-            if ":" in auth_part:
-                password = auth_part.split(":", 1)[1]
+def _get_redis_settings() -> RedisSettings:
+    """Get Redis settings from config."""
+    settings = get_settings()
+    # Parse redis URL
+    # Format: redis://[:password@]host[:port][/database]
+    url = settings.redis_url
+    if url.startswith("redis://"):
+        url = url[8:]
 
-        # Extract host and port
-        if "/" in url:
-            host_port, db = url.split("/", 1)
-            database = int(db) if db else 0
-        else:
-            host_port = url
-            database = 0
+    # Extract password if present
+    password = None
+    if "@" in url:
+        auth_part, url = url.split("@", 1)
+        if ":" in auth_part:
+            password = auth_part.split(":", 1)[1]
 
-        if ":" in host_port:
-            host, port_str = host_port.split(":", 1)
-            port = int(port_str)
-        else:
-            host = host_port
-            port = 6379
+    # Extract host and port
+    if "/" in url:
+        host_port, db = url.split("/", 1)
+        database = int(db) if db else 0
+    else:
+        host_port = url
+        database = 0
 
-        return RedisSettings(
-            host=host,
-            port=port,
-            password=password,
-            database=database,
-        )
+    if ":" in host_port:
+        host, port_str = host_port.split(":", 1)
+        port = int(port_str)
+    else:
+        host = host_port
+        port = 6379
+
+    return RedisSettings(
+        host=host,
+        port=port,
+        password=password,
+        database=database,
+    )
+
+
+# Set redis_settings as class attribute after class definition
+WorkerSettings.redis_settings = _get_redis_settings()
 
 
 def run_worker() -> None:
