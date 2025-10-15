@@ -15,6 +15,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        populate_by_name=True,
     )
 
     # ==========================================================================
@@ -104,21 +105,20 @@ class Settings(BaseSettings):
         Path,
         Field(default=Path("/tmp/repos"), description="Base path for cloned repositories"),
     ]
-    allowed_git_hosts: Annotated[
-        list[str],
+    # Note: Use comma-separated string in .env, parsed by validator below
+    allowed_git_hosts_str: Annotated[
+        str,
         Field(
-            default=["github.com", "gitlab.com", "bitbucket.org", "codeberg.org"],
-            description="Allowed Git hosts for cloning",
+            default="github.com,gitlab.com,bitbucket.org,codeberg.org",
+            alias="ALLOWED_GIT_HOSTS",
+            description="Allowed Git hosts for cloning (comma-separated)",
         ),
     ]
 
-    @field_validator("allowed_git_hosts", mode="before")
-    @classmethod
-    def parse_allowed_hosts(cls, v: str | list[str]) -> list[str]:
-        """Parse comma-separated string into list."""
-        if isinstance(v, str):
-            return [host.strip() for host in v.split(",") if host.strip()]
-        return v
+    @property
+    def allowed_git_hosts(self) -> list[str]:
+        """Get allowed Git hosts as a list."""
+        return [host.strip() for host in self.allowed_git_hosts_str.split(",") if host.strip()]
 
     # ==========================================================================
     # Rate Limiting Configuration (Dual-Layer)
