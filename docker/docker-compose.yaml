@@ -1,0 +1,159 @@
+# Code Explorer - Docker Compose Configuration
+# For local development and testing
+#
+# Note: PostgreSQL is hosted on Supabase (no local container needed)
+#
+# Usage:
+#   docker compose up -d          # Start all services
+#   docker compose logs -f api    # View API logs
+#   docker compose down           # Stop all services
+
+services:
+  # ==========================================================================
+  # API Service
+  # ==========================================================================
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: code-explorer-api
+    ports:
+      - "8000:8000"
+    environment:
+      # Supabase (required)
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET}
+      - DATABASE_URL=${DATABASE_URL}
+      # Redis
+      - REDIS_URL=redis://redis:6379/0
+      # Pinecone
+      - PINECONE_API_KEY=${PINECONE_API_KEY}
+      - PINECONE_INDEX_NAME=${PINECONE_INDEX_NAME:-code-explorer}
+      # OpenAI
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # Observability
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+      - OTLP_ENDPOINT=${OTLP_ENDPOINT:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - code-explorer
+
+  # ==========================================================================
+  # ARQ Worker Service
+  # ==========================================================================
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: code-explorer-worker
+    environment:
+      # Supabase (required)
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET}
+      - DATABASE_URL=${DATABASE_URL}
+      # Redis
+      - REDIS_URL=redis://redis:6379/0
+      # Pinecone
+      - PINECONE_API_KEY=${PINECONE_API_KEY}
+      - PINECONE_INDEX_NAME=${PINECONE_INDEX_NAME:-code-explorer}
+      # OpenAI
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # Git
+      - GIT_CLONE_TIMEOUT=${GIT_CLONE_TIMEOUT:-120}
+      - MAX_REPO_SIZE_MB=${MAX_REPO_SIZE_MB:-250}
+      # Observability
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+    volumes:
+      # Mount tmpfs for faster clone operations
+      - type: tmpfs
+        target: /tmp/repos
+        tmpfs:
+          size: 536870912  # 512MB
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - code-explorer
+
+  # ==========================================================================
+  # Redis (Task Queue + Rate Limiting)
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: code-explorer-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - code-explorer
+
+  # ==========================================================================
+  # Prometheus (Optional - Metrics Collection)
+  # ==========================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: code-explorer-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    profiles:
+      - monitoring
+    restart: unless-stopped
+    networks:
+      - code-explorer
+
+  # ==========================================================================
+  # Jaeger (Optional - Tracing UI)
+  # ==========================================================================
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: code-explorer-jaeger
+    ports:
+      - "16686:16686"  # UI
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    profiles:
+      - monitoring
+    restart: unless-stopped
+    networks:
+      - code-explorer
+
+networks:
+  code-explorer:
+    driver: bridge
+
+volumes:
+  redis-data:
+  prometheus-data:
