@@ -1,12 +1,15 @@
 """Supabase JWT authentication middleware."""
 
+import functools
 from typing import Annotated
 from uuid import UUID
 
+import httpx
 import jwt
 import structlog
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jwt import PyJWKClient
 from pydantic import BaseModel
 
 from code_explorer.config import Settings, get_settings
@@ -15,6 +18,9 @@ logger = structlog.get_logger(__name__)
 
 # HTTP Bearer token security scheme
 security = HTTPBearer(auto_error=True)
+
+# Cache for JWKS client
+_jwks_client: PyJWKClient | None = None
 
 
 class AuthenticatedUser(BaseModel):
@@ -25,12 +31,23 @@ class AuthenticatedUser(BaseModel):
     role: str = "authenticated"
 
 
+def get_jwks_client(supabase_url: str) -> PyJWKClient:
+    """Get or create cached JWKS client for Supabase."""
+    global _jwks_client
+    if _jwks_client is None:
+        jwks_url = f"{supabase_url}/auth/v1/.well-known/jwks.json"
+        _jwks_client = PyJWKClient(jwks_url, cache_keys=True, lifespan=3600)
+    return _jwks_client
+
+
 async def verify_supabase_token(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     settings: Settings = Depends(get_settings),
 ) -> AuthenticatedUser:
     """
     Verify Supabase JWT and extract user information.
+
+    Supports both ES256 (new Supabase projects) and HS256 (legacy).
 
     Args:
         credentials: Bearer token from Authorization header
@@ -45,11 +62,22 @@ async def verify_supabase_token(
     token = credentials.credentials
 
     try:
+        # First, try to get the signing key from JWKS (ES256)
+        try:
+            jwks_client = get_jwks_client(settings.supabase_url)
+            signing_key = jwks_client.get_signing_key_from_jwt(token)
+            key = signing_key.key
+            algorithms = ["ES256"]
+        except (jwt.exceptions.PyJWKClientError, jwt.exceptions.DecodeError):
+            # Fall back to HS256 with secret
+            key = settings.supabase_jwt_secret.get_secret_value()
+            algorithms = ["HS256"]
+
         # Decode and verify the JWT
         payload = jwt.decode(
             token,
-            settings.supabase_jwt_secret.get_secret_value(),
-            algorithms=["HS256"],
+            key,
+            algorithms=algorithms,
             audience="authenticated",
             options={
                 "require": ["sub", "exp", "aud"],
@@ -130,10 +158,20 @@ async def get_optional_user(
     token = auth_header[7:]  # Remove "Bearer " prefix
 
     try:
+        # Try ES256 (JWKS) first, fall back to HS256
+        try:
+            jwks_client = get_jwks_client(settings.supabase_url)
+            signing_key = jwks_client.get_signing_key_from_jwt(token)
+            key = signing_key.key
+            algorithms = ["ES256"]
+        except (jwt.exceptions.PyJWKClientError, jwt.exceptions.DecodeError):
+            key = settings.supabase_jwt_secret.get_secret_value()
+            algorithms = ["HS256"]
+
         payload = jwt.decode(
             token,
-            settings.supabase_jwt_secret.get_secret_value(),
-            algorithms=["HS256"],
+            key,
+            algorithms=algorithms,
             audience="authenticated",
             options={
                 "require": ["sub", "exp", "aud"],
