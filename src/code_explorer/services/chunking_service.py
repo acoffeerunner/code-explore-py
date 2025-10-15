@@ -27,6 +27,7 @@ SUPPORTED_EXTENSIONS: dict[str, Language] = {
     ".go": Language.GO,
     ".java": Language.JAVA,
     ".cs": Language.CSHARP,
+    ".md": Language.MARKDOWN,
 }
 
 

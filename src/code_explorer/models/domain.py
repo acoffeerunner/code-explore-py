@@ -55,6 +55,7 @@ class Language(str, Enum):
     GO = "go"
     JAVA = "java"
     CSHARP = "csharp"
+    MARKDOWN = "markdown"
     UNKNOWN = "unknown"
 
     @classmethod
@@ -70,6 +71,7 @@ class Language(str, Enum):
             ".go": cls.GO,
             ".java": cls.JAVA,
             ".cs": cls.CSHARP,
+            ".md": cls.MARKDOWN,
         }
         return mapping.get(ext.lower(), cls.UNKNOWN)
 
