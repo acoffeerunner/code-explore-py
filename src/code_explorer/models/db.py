@@ -100,6 +100,11 @@ class Repo(Base):
         back_populates="repo",
         cascade="all, delete-orphan",
     )
+    messages: Mapped[list["ChatMessage"]] = relationship(
+        "ChatMessage",
+        back_populates="repo",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -229,6 +234,56 @@ class Chunk(Base):
             "end_line",
             name="unique_chunk_location",
         ),
+    )
+
+
+class ChatMessage(Base):
+    """Chat message model - stores conversation history for each repo."""
+
+    __tablename__ = "chat_messages"
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    repo_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("repos.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        nullable=False,
+        index=True,
+        comment="References auth.users(id) in Supabase",
+    )
+    role: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        comment="user or assistant",
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    sources: Mapped[list | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="Source citations for assistant messages",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    # Relationships
+    repo: Mapped["Repo"] = relationship("Repo", back_populates="messages")
+
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('user', 'assistant')",
+            name="valid_message_role",
+        ),
+        Index("idx_messages_repo_created", "repo_id", "created_at"),
     )
 
 

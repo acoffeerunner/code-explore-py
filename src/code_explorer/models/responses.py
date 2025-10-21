@@ -71,6 +71,23 @@ class ChatResponse(BaseModel):
     usage: TokenUsage
 
 
+class ChatMessageResponse(BaseModel):
+    """Response containing a single chat message."""
+
+    id: UUID
+    role: str
+    content: str
+    sources: list[SourceCitation] | None = None
+    created_at: datetime
+
+
+class ChatHistoryResponse(BaseModel):
+    """Response containing chat history for a repository."""
+
+    messages: list[ChatMessageResponse]
+    total: int
+
+
 class FileInfo(BaseModel):
     """Information about an indexed file."""
 
