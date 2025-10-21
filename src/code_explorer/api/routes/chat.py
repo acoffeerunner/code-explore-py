@@ -93,7 +93,7 @@ async def chat(
             user_id=user.user_id,
             role="assistant",
             content=response.answer,
-            sources=[s.model_dump() for s in response.sources] if response.sources else None,
+            sources=[s.model_dump(mode="json") for s in response.sources] if response.sources else None,
         )
         db.add(assistant_message)
         await db.commit()
