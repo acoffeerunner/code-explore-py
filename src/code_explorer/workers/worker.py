@@ -64,9 +64,15 @@ def _get_redis_settings() -> RedisSettings:
     """Get Redis settings from config."""
     settings = get_settings()
     # Parse redis URL
-    # Format: redis://[:password@]host[:port][/database]
+    # Format: redis[s]://[:password@]host[:port][/database]
     url = settings.redis_url
-    if url.startswith("redis://"):
+
+    # Check for TLS (rediss://)
+    ssl = False
+    if url.startswith("rediss://"):
+        ssl = True
+        url = url[9:]
+    elif url.startswith("redis://"):
         url = url[8:]
 
     # Extract password if present
@@ -96,6 +102,7 @@ def _get_redis_settings() -> RedisSettings:
         port=port,
         password=password,
         database=database,
+        ssl=ssl,
     )
 
 
