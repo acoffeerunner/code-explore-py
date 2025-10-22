@@ -31,15 +31,12 @@ RUN uv pip install --no-cache .
 # =============================================================================
 FROM python:3.13-slim as runtime
 
-# Create non-root user
-RUN groupadd --gid 1000 appuser && \
-    useradd --uid 1000 --gid 1000 --shell /bin/bash --create-home appuser
-
 WORKDIR /app
 
-# Install runtime dependencies
+# Install runtime dependencies (git for cloning, supervisor for process management)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    supervisor \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy virtual environment from builder
@@ -47,13 +44,13 @@ COPY --from=builder /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 
 # Copy application code
-COPY --chown=appuser:appuser src/ ./src/
+COPY src/ ./src/
+
+# Copy supervisor config
+COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 # Create temp directory for clones
-RUN mkdir -p /tmp/repos && chown appuser:appuser /tmp/repos
-
-# Switch to non-root user
-USER appuser
+RUN mkdir -p /tmp/repos
 
 # Environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -67,5 +64,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # Expose port
 EXPOSE 8000
 
-# Run with uvicorn
-CMD ["uvicorn", "code_explorer.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run supervisor to manage both uvicorn and arq worker
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
