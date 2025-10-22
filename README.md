@@ -96,6 +96,8 @@ docker compose logs -f api worker
 | DELETE | `/repos/{id}` | Delete repository and vectors |
 | POST | `/repos/{id}/reindex` | Trigger re-indexing |
 | POST | `/chat` | Ask questions about a repository |
+| GET | `/chat/history/{repo_id}` | Get chat history for a repository |
+| DELETE | `/chat/history/{repo_id}` | Clear chat history for a repository |
 | GET | `/metrics` | Prometheus metrics |
 
 ## Architecture
