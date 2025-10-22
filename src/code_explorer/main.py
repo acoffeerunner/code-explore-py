@@ -47,7 +47,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Initialize ARQ Redis connection for job enqueueing
     try:
-        _arq_redis = await create_pool(WorkerSettings.redis_settings())
+        _arq_redis = await create_pool(WorkerSettings.redis_settings)
         repos.set_arq_redis(_arq_redis)
         await log.ainfo("ARQ Redis connection initialized")
     except Exception as e:
