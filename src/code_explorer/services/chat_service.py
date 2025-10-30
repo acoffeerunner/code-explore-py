@@ -1,5 +1,6 @@
 """RAG-based chat service for answering questions about code."""
 
+import json
 import re
 from uuid import UUID
 
@@ -311,6 +312,60 @@ Please answer the question based on the code context above. Use citations [1], [
             )
 
         return sources
+
+    async def _rerank_chunks(
+        self,
+        chunks: list[RetrievedChunk],
+        question: str,
+    ) -> list[RetrievedChunk]:
+        """Rerank retrieved chunks using LLM-based relevance scoring."""
+        if not chunks or not self.settings.reranker_enabled:
+            return chunks
+
+        try:
+            chunk_descriptions = []
+            for i, chunk in enumerate(chunks):
+                desc = f"[{i}] {chunk.file_path}:{chunk.start_line}-{chunk.end_line}"
+                if chunk.symbol_name:
+                    desc += f" ({chunk.symbol_name})"
+                desc += f"\n{chunk.content[:200]}"
+                chunk_descriptions.append(desc)
+
+            response = await self.client.chat.completions.create(
+                model=self.settings.reranker_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a code relevance scorer. Given a question and code chunks, "
+                            "score each chunk's relevance from 1 (irrelevant) to 5 (highly relevant). "
+                            'Respond with ONLY a JSON array: [{"index": 0, "score": 3}, ...]'
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Question: {question}\n\nChunks:\n" + "\n\n".join(chunk_descriptions),
+                    },
+                ],
+                max_completion_tokens=500,
+            )
+
+            scores_text = response.choices[0].message.content or "[]"
+            scores_text = scores_text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            scores = json.loads(scores_text)
+
+            score_map = {item["index"]: item["score"] for item in scores}
+
+            reranked = sorted(
+                enumerate(chunks),
+                key=lambda x: score_map.get(x[0], 0),
+                reverse=True,
+            )
+            return [chunk for _, chunk in reranked]
+
+        except Exception as e:
+            logger.warning("Reranking failed, using original order", error=str(e))
+            return chunks
 
     async def close(self) -> None:
         """Close the OpenAI client."""
