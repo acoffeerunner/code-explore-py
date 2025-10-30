@@ -153,6 +153,40 @@ class EmbeddingService:
         results = await self.embed_texts([text], use_cache=use_cache)
         return results[0]
 
+    def build_embed_text(
+        self,
+        content: str,
+        file_path: str,
+        symbol_type: str | None,
+        symbol_name: str | None,
+        language: str,
+        docstring: str | None,
+    ) -> str:
+        """Build enriched text for embedding with structural header and docstring.
+
+        The original content is prepended with metadata so the embedding model
+        can encode structural context (file location, symbol identity, language).
+        Docstrings are repeated for higher weight in the embedding.
+        """
+        parts: list[str] = []
+
+        # Docstring (repeated for weight)
+        if docstring:
+            parts.append(f"# {docstring}")
+            parts.append(f"# {docstring}")
+
+        # Structural header
+        header = f"# File: {file_path}"
+        if symbol_type and symbol_name:
+            header += f" | {symbol_type}: {symbol_name}"
+        header += f" | Language: {language}"
+        parts.append(header)
+
+        # Original content
+        parts.append(content)
+
+        return "\n".join(parts)
+
     def clear_cache(self) -> None:
         """Clear the embedding cache."""
         self._cache.clear()

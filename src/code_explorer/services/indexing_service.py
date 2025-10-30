@@ -167,9 +167,19 @@ class IndexingService:
             await db.flush()
             await log.ainfo("Chunks stored in database")
 
-            # Step 9: Generate embeddings (batched)
-            chunk_contents = [c.content for c in all_chunks]
-            embeddings = await self.embedding.embed_texts(chunk_contents)
+            # Step 9: Generate embeddings (batched) — with structural headers
+            embed_texts = [
+                self.embedding.build_embed_text(
+                    content=c.content,
+                    file_path=c.file_path,
+                    symbol_type=c.symbol_type.value if c.symbol_type else None,
+                    symbol_name=c.symbol_name,
+                    language=c.language.value,
+                    docstring=c.docstring,
+                )
+                for c in all_chunks
+            ]
+            embeddings = await self.embedding.embed_texts(embed_texts)
 
             await log.ainfo("Embeddings generated")
             await self._update_progress(db, repo, 75)
