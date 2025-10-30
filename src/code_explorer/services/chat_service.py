@@ -5,6 +5,7 @@ import re
 from uuid import UUID
 
 import structlog
+import tiktoken
 from openai import AsyncOpenAI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,7 +20,7 @@ from code_explorer.services.vector_service import VectorService
 logger = structlog.get_logger(__name__)
 
 # Maximum context window size in tokens
-MAX_CONTEXT_TOKENS = 6000
+MAX_CONTEXT_TOKENS = 12_000
 
 
 class ChatError(Exception):
@@ -42,6 +43,7 @@ class ChatService:
         self.embedding = embedding_service or EmbeddingService()
         self.vector = vector_service or VectorService()
         self._client: AsyncOpenAI | None = None
+        self._tokenizer = tiktoken.get_encoding("cl100k_base")
 
     @property
     def client(self) -> AsyncOpenAI:
@@ -162,7 +164,7 @@ class ChatService:
         # Step 7: Call LLM
         model_name = model or self.settings.default_chat_model
         system_prompt = self._build_system_prompt(repo.url, repo.branch)
-        user_prompt = self._build_user_prompt(context, question)
+        user_prompt = self._build_user_prompt(context, "", question)
 
         await log.ainfo(
             "Calling LLM",
@@ -202,23 +204,25 @@ class ChatService:
             usage=usage,
         )
 
+    def _apply_score_threshold(
+        self,
+        chunks: list[RetrievedChunk],
+        min_score: float,
+    ) -> list[RetrievedChunk]:
+        """Filter out chunks below the minimum similarity score."""
+        return [c for c in chunks if c.score >= min_score]
+
     def _build_context(
         self,
         chunks: list[RetrievedChunk],
     ) -> tuple[str, dict[int, RetrievedChunk]]:
-        """
-        Build context string from retrieved chunks.
-
-        Returns:
-            Tuple of (context_string, citation_index_to_chunk_map)
-        """
+        """Build context string from retrieved chunks using tiktoken for token counting."""
         context_parts: list[str] = []
         chunk_map: dict[int, RetrievedChunk] = {}
         total_tokens = 0
 
         for i, chunk in enumerate(chunks, start=1):
-            # Estimate tokens (rough approximation)
-            chunk_tokens = len(chunk.content.split()) * 1.3
+            chunk_tokens = len(self._tokenizer.encode(chunk.content))
 
             if total_tokens + chunk_tokens > MAX_CONTEXT_TOKENS:
                 break
@@ -237,29 +241,29 @@ class ChatService:
 
     def _build_system_prompt(self, repo_url: str, branch: str) -> str:
         """Build system prompt for the LLM."""
-        return f"""You are a helpful code assistant for the repository at {repo_url} (branch: {branch}).
+        return f"""You are a code assistant for the repository at {repo_url} (branch: {branch}).
 
-You have access to code chunks from this repository, provided in the context below.
-When answering questions:
-1. Reference specific code using citations in brackets: [1], [2], etc.
-2. Only cite chunks that are provided in the context
-3. Be specific about file locations and line numbers
-4. If you're unsure or the context doesn't contain relevant information, say so
-5. Focus on explaining the code clearly and accurately
+You answer questions using code chunks provided in the context below. Follow these rules:
 
-Important: Do not make up or hallucinate code. Only reference code that is explicitly shown in the context."""
+1. Reference specific code using citations: [1], [2], etc.
+2. Only cite chunks from the provided context — never fabricate code.
+3. Include file paths and line numbers when discussing specific code.
+4. For multi-step questions (e.g., "trace the flow from X to Y"), think step by step:
+   - Identify the entry point
+   - Follow the call chain through the relevant files
+   - Explain each step with citations
+5. If the context does not contain enough information to answer confidently, say so explicitly. Do not guess.
+6. Chunks marked as [CONTEXT] are structural context (e.g., parent class definitions) — use them to understand the code but prefer citing numbered chunks.
 
-    def _build_user_prompt(self, context: str, question: str) -> str:
+Be precise and concise. Explain code clearly."""
+
+    def _build_user_prompt(self, context: str, parent_context: str, question: str) -> str:
         """Build user prompt with context and question."""
-        return f"""Context (code chunks from the repository, numbered for citation):
-
-{context}
-
----
-
-Question: {question}
-
-Please answer the question based on the code context above. Use citations [1], [2], etc. when referencing specific code chunks."""
+        prompt = f"Code chunks from the repository (numbered for citation):\n\n{context}"
+        if parent_context:
+            prompt += f"\n\n---\n\n[CONTEXT] Structural context (parent classes/modules):\n\n{parent_context}"
+        prompt += f"\n\n---\n\nQuestion: {question}\n\nAnswer using citations [1], [2], etc."
+        return prompt
 
     def _extract_citations(
         self,
