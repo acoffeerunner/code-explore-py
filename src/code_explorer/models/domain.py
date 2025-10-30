@@ -93,6 +93,7 @@ class CodeChunk(BaseModel):
     content: str
     token_count: int
     content_hash: str
+    docstring: str | None = None
 
 
 class PineconeMetadata(BaseModel):

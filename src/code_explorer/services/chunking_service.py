@@ -220,6 +220,7 @@ class ChunkingService:
                         content=symbol_content,
                         token_count=token_count,
                         content_hash=self.get_content_hash(symbol_content),
+                        docstring=symbol.get("docstring"),
                     )
                 )
             else:
@@ -300,12 +301,14 @@ class ChunkingService:
         if node.type in symbol_types:
             # Extract symbol name
             name = self._extract_symbol_name(node)
+            docstring = self._extract_docstring(node, lines)
             symbols.append(
                 {
                     "name": name,
                     "type": symbol_types[node.type],
                     "start_line": node.start_point[0],
                     "end_line": node.end_point[0],
+                    "docstring": docstring,
                 }
             )
         else:
@@ -314,6 +317,44 @@ class ChunkingService:
                 symbols.extend(self._extract_symbols(child, symbol_types, lines))
 
         return symbols
+
+    def _extract_docstring(self, node: Any, lines: list[str]) -> str | None:
+        """Extract docstring from a function/class AST node.
+
+        Looks for a string expression as the first statement in the body.
+        Works for Python triple-quoted docstrings.
+        """
+        # Find the body/block child
+        body = None
+        for child in node.children:
+            if child.type in ("block", "class_body", "statement_block"):
+                body = child
+                break
+
+        if body is None:
+            return None
+
+        # First meaningful child of the body
+        for child in body.children:
+            if child.type in ("expression_statement",):
+                # Check if it contains a string
+                for sub in child.children:
+                    if sub.type == "string":
+                        raw = sub.text.decode("utf-8")
+                        # Strip triple quotes
+                        for quote in ('"""', "'''"):
+                            if raw.startswith(quote) and raw.endswith(quote):
+                                return raw[3:-3].strip()
+                        # Strip single quotes
+                        for quote in ('"', "'"):
+                            if raw.startswith(quote) and raw.endswith(quote):
+                                return raw[1:-1].strip()
+                        return raw.strip()
+            elif child.type not in ("comment", "newline"):
+                # First non-comment statement is not a string — no docstring
+                break
+
+        return None
 
     def _extract_symbol_name(self, node: Any) -> str | None:
         """Extract the name of a symbol from its AST node."""
