@@ -91,6 +91,34 @@ class Settings(BaseSettings):
     ]
 
     # ==========================================================================
+    # RAG Pipeline Configuration
+    # ==========================================================================
+    reranker_model: Annotated[
+        str,
+        Field(default="gpt-4o-mini", description="Model used for LLM-based reranking"),
+    ]
+    hyde_model: Annotated[
+        str,
+        Field(default="gpt-4o-mini", description="Model used for HyDE generation"),
+    ]
+    hyde_enabled: Annotated[
+        bool,
+        Field(default=True, description="Enable HyDE (Hypothetical Document Embedding)"),
+    ]
+    reranker_enabled: Annotated[
+        bool,
+        Field(default=True, description="Enable LLM-based reranking"),
+    ]
+    min_similarity_score: Annotated[
+        float,
+        Field(default=0.3, ge=0.0, le=1.0, description="Minimum vector similarity threshold"),
+    ]
+    chat_history_turns: Annotated[
+        int,
+        Field(default=5, ge=0, le=20, description="Number of previous chat turns sent for context"),
+    ]
+
+    # ==========================================================================
     # Git Configuration
     # ==========================================================================
     git_clone_timeout: Annotated[
