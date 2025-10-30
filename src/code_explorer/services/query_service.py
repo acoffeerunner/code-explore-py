@@ -1,8 +1,13 @@
 """Query translation service for keyword extraction and metadata filter parsing."""
 
+from __future__ import annotations
+
 import re
 
 import structlog
+from openai import AsyncOpenAI
+
+from code_explorer.config import Settings, get_settings
 
 logger = structlog.get_logger(__name__)
 
@@ -42,6 +47,52 @@ PATH_HINT_PATTERNS = [
 
 class QueryService:
     """Service for query translation: keyword extraction and metadata filter parsing."""
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        if settings is not None:
+            self.settings = settings
+        else:
+            try:
+                self.settings = get_settings()
+            except Exception:
+                self.settings = None  # type: ignore[assignment]
+        self._client: AsyncOpenAI | None = None
+
+    def _get_openai_client(self) -> AsyncOpenAI:
+        if self._client is None:
+            self._client = AsyncOpenAI(
+                api_key=self.settings.openai_api_key.get_secret_value(),
+            )
+        return self._client
+
+    async def generate_hyde(self, question: str) -> str:
+        """Generate a hypothetical code snippet that answers the question (HyDE).
+
+        Falls back to the original question if the LLM call fails.
+        """
+        try:
+            client = self._get_openai_client()
+            response = await client.chat.completions.create(
+                model=self.settings.hyde_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Write a short code snippet that would answer this question about a codebase. "
+                            "Do not explain, just write plausible code. Include function/class names."
+                        ),
+                    },
+                    {"role": "user", "content": question},
+                ],
+                max_completion_tokens=300,
+            )
+            result = response.choices[0].message.content
+            if result:
+                return result.strip()
+            return question
+        except Exception as e:
+            logger.warning("HyDE generation failed, using original question", error=str(e))
+            return question
 
     def extract_keywords(self, question: str) -> list[str]:
         """Extract likely code identifiers from a natural language question.
