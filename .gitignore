@@ -97,3 +97,6 @@ Thumbs.db
 # Project specific
 *.log
 .ruff_cache/
+
+# Git worktrees
+.worktrees/
