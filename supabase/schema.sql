@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS public.chunks (
     content TEXT NOT NULL,  -- Full chunk text stored here
     content_hash VARCHAR(64) NOT NULL,  -- SHA256 of content
     token_count INTEGER NOT NULL,
+    fts tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
     created_at TIMESTAMPTZ DEFAULT NOW(),
 
     CONSTRAINT unique_chunk_location UNIQUE (version_id, file_path, start_line, end_line)
@@ -80,6 +81,7 @@ CREATE TABLE IF NOT EXISTS public.chunks (
 CREATE INDEX IF NOT EXISTS idx_chunks_version ON public.chunks(version_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_repo ON public.chunks(repo_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_content_hash ON public.chunks(content_hash);
+CREATE INDEX IF NOT EXISTS idx_chunks_fts ON public.chunks USING gin (fts);
 
 -- webhook_deliveries table (for tracking delivery attempts)
 CREATE TABLE IF NOT EXISTS public.webhook_deliveries (
