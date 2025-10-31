@@ -85,6 +85,7 @@ async def chat(
             question=request.question,
             model=request.model,
             top_k=request.top_k,
+            history=request.history,
         )
 
         # Save assistant message with sources

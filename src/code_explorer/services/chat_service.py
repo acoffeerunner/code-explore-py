@@ -15,6 +15,7 @@ from code_explorer.models.db import Chunk, IndexVersion, Repo
 from code_explorer.models.domain import RetrievedChunk, SourceCitation, TokenUsage
 from code_explorer.models.responses import ChatResponse
 from code_explorer.services.embedding_service import EmbeddingService
+from code_explorer.services.query_service import QueryService
 from code_explorer.services.vector_service import VectorService
 
 logger = structlog.get_logger(__name__)
@@ -37,11 +38,13 @@ class ChatService:
         settings: Settings | None = None,
         embedding_service: EmbeddingService | None = None,
         vector_service: VectorService | None = None,
+        query_service: QueryService | None = None,
     ) -> None:
         """Initialize chat service."""
         self.settings = settings or get_settings()
         self.embedding = embedding_service or EmbeddingService()
         self.vector = vector_service or VectorService()
+        self.query_svc = query_service or QueryService(settings=self.settings)
         self._client: AsyncOpenAI | None = None
         self._tokenizer = tiktoken.get_encoding("cl100k_base")
 
@@ -62,32 +65,9 @@ class ChatService:
         question: str,
         model: str | None = None,
         top_k: int = 15,
+        history: list[dict[str, str]] | None = None,
     ) -> ChatResponse:
-        """
-        Answer a question about code using RAG.
-
-        Pipeline:
-        1. Verify user owns the repo
-        2. Get active index version namespace
-        3. Embed the question
-        4. Query Pinecone for relevant chunks
-        5. Fetch chunk content from Postgres
-        6. Build context window
-        7. Call LLM with structured prompt
-        8. Validate and extract citations
-        9. Return structured response
-
-        Args:
-            db: Database session
-            repo_id: Repository UUID
-            user_id: Authenticated user UUID
-            question: User's question
-            model: Optional LLM model override
-            top_k: Number of chunks to retrieve
-
-        Returns:
-            ChatResponse with answer, sources, and usage
-        """
+        """Answer a question about code using the enhanced RAG pipeline."""
         log = logger.bind(repo_id=str(repo_id), question_length=len(question))
         await log.ainfo("Processing chat query")
 
@@ -110,20 +90,45 @@ class ChatService:
         if not version:
             raise ChatError("Index version not found")
 
-        # Step 2: Get namespace
         namespace = version.pinecone_namespace
 
-        # Step 3: Embed question
-        question_embedding = await self.embedding.embed_single(question)
+        # Step 2: Chat history rewrite
+        effective_question = question
+        if history:
+            effective_question = await self.query_svc.rewrite_with_history(question, history)
+            await log.ainfo("History rewrite complete", rewritten=effective_question[:100])
 
-        # Step 4: Query Pinecone
-        matches = await self.vector.query(
-            namespace=namespace,
-            vector=question_embedding,
-            top_k=top_k,
+        # Step 3: Keyword + metadata extraction
+        keywords = self.query_svc.extract_keywords(effective_question)
+        metadata_filters = self.query_svc.extract_metadata_filters(effective_question)
+        await log.ainfo("Query analysis complete", keywords=keywords, filters=metadata_filters)
+
+        # Step 4: HyDE
+        embed_text = effective_question
+        if self.settings.hyde_enabled:
+            embed_text = await self.query_svc.generate_hyde(effective_question)
+            await log.ainfo("HyDE generation complete")
+
+        # Step 5: Dense search (Pinecone with metadata filters)
+        question_embedding = await self.embedding.embed_single(embed_text)
+        pinecone_filter = self._build_pinecone_filter(metadata_filters)
+        dense_matches = await self.vector.query(
+            namespace=namespace, vector=question_embedding, top_k=top_k, filter=pinecone_filter,
         )
 
-        if not matches:
+        # Step 6: Sparse search (Postgres FTS with extracted keywords)
+        sparse_matches = await self._fts_search(db, version.id, keywords, limit=top_k)
+
+        # Step 7: RRF fusion
+        merged = self._reciprocal_rank_fusion(dense_matches, sparse_matches)
+        await log.ainfo(
+            "Search complete",
+            dense_count=len(dense_matches),
+            sparse_count=len(sparse_matches),
+            merged_count=len(merged),
+        )
+
+        if not merged:
             await log.ainfo("No relevant chunks found")
             return ChatResponse(
                 answer="I couldn't find any relevant code to answer your question. "
@@ -133,21 +138,20 @@ class ChatService:
                 usage=TokenUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
             )
 
-        # Step 5: Fetch chunk content from Postgres
-        chunk_ids = [UUID(m["id"]) for m in matches]
+        # Step 8: Fetch chunk content from Postgres
+        chunk_ids = [UUID(m["id"]) for m in merged[:top_k]]
         chunks_result = await db.execute(select(Chunk).where(Chunk.id.in_(chunk_ids)))
         db_chunks = {c.id: c for c in chunks_result.scalars().all()}
 
-        # Build retrieved chunks with content
         retrieved_chunks: list[RetrievedChunk] = []
-        for match in matches:
+        for match in merged[:top_k]:
             chunk_id = UUID(match["id"])
             if chunk_id in db_chunks:
                 db_chunk = db_chunks[chunk_id]
                 retrieved_chunks.append(
                     RetrievedChunk(
                         chunk_id=chunk_id,
-                        score=match["score"],
+                        score=match.get("rrf_score", match.get("score", 0.0)),
                         file_path=db_chunk.file_path,
                         start_line=db_chunk.start_line,
                         end_line=db_chunk.end_line,
@@ -158,18 +162,34 @@ class ChatService:
                     )
                 )
 
-        # Step 6: Build context window
-        context, chunk_map = self._build_context(retrieved_chunks)
+        # Step 9: Score threshold filtering
+        retrieved_chunks = self._apply_score_threshold(
+            retrieved_chunks, min_score=self.settings.min_similarity_score
+        )
 
-        # Step 7: Call LLM
+        # Step 10: Parent chunk expansion
+        parent_chunks = await self._fetch_parent_chunks(db, retrieved_chunks, version.id)
+
+        # Step 11: LLM reranking (if enabled)
+        if self.settings.reranker_enabled:
+            retrieved_chunks = await self._rerank_chunks(retrieved_chunks, effective_question)
+
+        # Step 12: Build context with tiktoken
+        context, chunk_map = self._build_context(retrieved_chunks)
+        parent_context = ""
+        if parent_chunks:
+            parent_context, _ = self._build_context(parent_chunks)
+
+        # Step 13: Call LLM
         model_name = model or self.settings.default_chat_model
         system_prompt = self._build_system_prompt(repo.url, repo.branch)
-        user_prompt = self._build_user_prompt(context, "", question)
+        user_prompt = self._build_user_prompt(context, parent_context, effective_question)
 
         await log.ainfo(
             "Calling LLM",
             model=model_name,
             context_chunks=len(retrieved_chunks),
+            parent_chunks=len(parent_chunks),
         )
 
         response = await self.client.chat.completions.create(
@@ -188,7 +208,7 @@ class ChatService:
             total_tokens=response.usage.total_tokens if response.usage else 0,
         )
 
-        # Step 8: Validate and extract citations
+        # Step 14: Extract citations
         sources = self._extract_citations(answer, chunk_map)
 
         await log.ainfo(
@@ -203,6 +223,74 @@ class ChatService:
             model=model_name,
             usage=usage,
         )
+
+    def _build_pinecone_filter(self, metadata_filters: dict[str, str]) -> dict | None:
+        """Convert extracted metadata filters to Pinecone filter format."""
+        if not metadata_filters:
+            return None
+
+        pinecone_filter: dict = {}
+        if "language" in metadata_filters:
+            pinecone_filter["language"] = {"$eq": metadata_filters["language"]}
+        if "symbol_type" in metadata_filters:
+            pinecone_filter["symbol_type"] = {"$eq": metadata_filters["symbol_type"]}
+
+        return pinecone_filter if pinecone_filter else None
+
+    async def _fetch_parent_chunks(
+        self,
+        db: AsyncSession,
+        chunks: list[RetrievedChunk],
+        version_id: UUID,
+    ) -> list[RetrievedChunk]:
+        """Fetch parent class chunks for method-type retrieved chunks."""
+        from sqlalchemy import text
+
+        parent_chunks: list[RetrievedChunk] = []
+        seen_parents: set[str] = set()
+
+        for chunk in chunks:
+            if chunk.symbol_type != "method":
+                continue
+
+            parent_key = f"{chunk.file_path}:{chunk.start_line}"
+            if parent_key in seen_parents:
+                continue
+
+            result = await db.execute(
+                text(
+                    "SELECT id, file_path, start_line, end_line, symbol_name, symbol_type, "
+                    "language, content FROM chunks "
+                    "WHERE version_id = :vid AND file_path = :path "
+                    "AND symbol_type = 'class' "
+                    "AND start_line <= :method_start AND end_line >= :method_end "
+                    "LIMIT 1"
+                ),
+                {
+                    "vid": version_id,
+                    "path": chunk.file_path,
+                    "method_start": chunk.start_line,
+                    "method_end": chunk.end_line,
+                },
+            )
+            row = result.fetchone()
+            if row:
+                seen_parents.add(parent_key)
+                parent_chunks.append(
+                    RetrievedChunk(
+                        chunk_id=row.id,
+                        score=0.0,
+                        file_path=row.file_path,
+                        start_line=row.start_line,
+                        end_line=row.end_line,
+                        symbol_name=row.symbol_name,
+                        symbol_type=row.symbol_type,
+                        language=row.language,
+                        content=row.content,
+                    )
+                )
+
+        return parent_chunks
 
     def _apply_score_threshold(
         self,
