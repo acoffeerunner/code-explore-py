@@ -2,6 +2,7 @@
 
 import json
 import re
+import time
 from uuid import UUID
 
 import structlog
@@ -57,7 +58,7 @@ class ChatService:
             )
         return self._client
 
-    async def query(
+    async def query_retrieval(
         self,
         db: AsyncSession,
         repo_id: UUID,
@@ -66,10 +67,10 @@ class ChatService:
         model: str | None = None,
         top_k: int = 15,
         history: list[dict[str, str]] | None = None,
-    ) -> ChatResponse:
-        """Answer a question about code using the enhanced RAG pipeline."""
+    ) -> dict:
+        """Run the retrieval pipeline and return prompts + chunk_map for streaming or sync use."""
         log = logger.bind(repo_id=str(repo_id), question_length=len(question))
-        await log.ainfo("Processing chat query")
+        await log.ainfo("Processing chat query (retrieval phase)")
 
         # Step 1: Verify ownership and get repo
         result = await db.execute(select(Repo).where(Repo.id == repo_id, Repo.user_id == user_id))
@@ -95,8 +96,9 @@ class ChatService:
         # Step 2: Chat history rewrite
         effective_question = question
         if history:
+            t0 = time.perf_counter()
             effective_question = await self.query_svc.rewrite_with_history(question, history)
-            await log.ainfo("History rewrite complete", rewritten=effective_question[:100])
+            await log.ainfo("History rewrite complete", duration_ms=round((time.perf_counter() - t0) * 1000), rewritten=effective_question[:100])
 
         # Step 3: Keyword + metadata extraction
         keywords = self.query_svc.extract_keywords(effective_question)
@@ -106,18 +108,26 @@ class ChatService:
         # Step 4: HyDE
         embed_text = effective_question
         if self.settings.hyde_enabled:
+            t0 = time.perf_counter()
             embed_text = await self.query_svc.generate_hyde(effective_question)
-            await log.ainfo("HyDE generation complete")
+            await log.ainfo("HyDE generation complete", duration_ms=round((time.perf_counter() - t0) * 1000))
 
         # Step 5: Dense search (Pinecone with metadata filters)
+        t0 = time.perf_counter()
         question_embedding = await self.embedding.embed_single(embed_text)
+        await log.ainfo("Embedding complete", duration_ms=round((time.perf_counter() - t0) * 1000))
+
         pinecone_filter = self._build_pinecone_filter(metadata_filters)
+        t0 = time.perf_counter()
         dense_matches = await self.vector.query(
             namespace=namespace, vector=question_embedding, top_k=top_k, filter=pinecone_filter,
         )
+        dense_ms = round((time.perf_counter() - t0) * 1000)
 
         # Step 6: Sparse search (Postgres FTS with extracted keywords)
+        t0 = time.perf_counter()
         sparse_matches = await self._fts_search(db, version.id, keywords, limit=top_k)
+        sparse_ms = round((time.perf_counter() - t0) * 1000)
 
         # Step 7: RRF fusion
         merged = self._reciprocal_rank_fusion(dense_matches, sparse_matches)
@@ -126,17 +136,21 @@ class ChatService:
             dense_count=len(dense_matches),
             sparse_count=len(sparse_matches),
             merged_count=len(merged),
+            dense_ms=dense_ms,
+            sparse_ms=sparse_ms,
         )
+
+        model_name = model or self.settings.default_chat_model
 
         if not merged:
             await log.ainfo("No relevant chunks found")
-            return ChatResponse(
-                answer="I couldn't find any relevant code to answer your question. "
-                "Please make sure the repository has been indexed and try rephrasing your question.",
-                sources=[],
-                model=model or self.settings.default_chat_model,
-                usage=TokenUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
-            )
+            return {
+                "system_prompt": "",
+                "user_prompt": "",
+                "chunk_map": {},
+                "model_name": model_name,
+                "no_results": True,
+            }
 
         # Step 8: Fetch chunk content from Postgres
         chunk_ids = [UUID(m["id"]) for m in merged[:top_k]]
@@ -168,11 +182,15 @@ class ChatService:
         )
 
         # Step 10: Parent chunk expansion
+        t0 = time.perf_counter()
         parent_chunks = await self._fetch_parent_chunks(db, retrieved_chunks, version.id)
+        await log.ainfo("Parent expansion complete", duration_ms=round((time.perf_counter() - t0) * 1000), parent_count=len(parent_chunks))
 
         # Step 11: LLM reranking (if enabled)
         if self.settings.reranker_enabled:
+            t0 = time.perf_counter()
             retrieved_chunks = await self._rerank_chunks(retrieved_chunks, effective_question)
+            await log.ainfo("Reranking complete", duration_ms=round((time.perf_counter() - t0) * 1000))
 
         # Step 12: Build context with tiktoken
         context, chunk_map = self._build_context(retrieved_chunks)
@@ -180,23 +198,56 @@ class ChatService:
         if parent_chunks:
             parent_context, _ = self._build_context(parent_chunks)
 
-        # Step 13: Call LLM
-        model_name = model or self.settings.default_chat_model
         system_prompt = self._build_system_prompt(repo.url, repo.branch)
         user_prompt = self._build_user_prompt(context, parent_context, effective_question)
 
         await log.ainfo(
-            "Calling LLM",
+            "Retrieval phase complete",
             model=model_name,
             context_chunks=len(retrieved_chunks),
             parent_chunks=len(parent_chunks),
         )
 
+        return {
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "chunk_map": chunk_map,
+            "model_name": model_name,
+            "no_results": False,
+        }
+
+    async def query(
+        self,
+        db: AsyncSession,
+        repo_id: UUID,
+        user_id: UUID,
+        question: str,
+        model: str | None = None,
+        top_k: int = 15,
+        history: list[dict[str, str]] | None = None,
+    ) -> ChatResponse:
+        """Answer a question about code using the enhanced RAG pipeline."""
+        retrieval = await self.query_retrieval(
+            db, repo_id, user_id, question, model, top_k, history,
+        )
+
+        if retrieval["no_results"]:
+            return ChatResponse(
+                answer="I couldn't find any relevant code to answer your question. "
+                "Please make sure the repository has been indexed and try rephrasing your question.",
+                sources=[],
+                model=retrieval["model_name"],
+                usage=TokenUsage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+            )
+
+        log = logger.bind(repo_id=str(repo_id))
+        await log.ainfo("Calling LLM", model=retrieval["model_name"])
+
         response = await self.client.chat.completions.create(
-            model=model_name,
+            model=retrieval["model_name"],
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "system", "content": retrieval["system_prompt"]},
+                {"role": "user", "content": retrieval["user_prompt"]},
             ],
             max_completion_tokens=4000,
         )
@@ -208,8 +259,7 @@ class ChatService:
             total_tokens=response.usage.total_tokens if response.usage else 0,
         )
 
-        # Step 14: Extract citations
-        sources = self._extract_citations(answer, chunk_map)
+        sources = self._extract_citations(answer, retrieval["chunk_map"])
 
         await log.ainfo(
             "Chat query completed",
@@ -220,9 +270,35 @@ class ChatService:
         return ChatResponse(
             answer=answer,
             sources=sources,
-            model=model_name,
+            model=retrieval["model_name"],
             usage=usage,
         )
+
+    async def _stream_llm_response(
+        self,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+    ):
+        """Yield SSE events from a streaming OpenAI chat completion."""
+        stream = await self.client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_completion_tokens=4000,
+            stream=True,
+        )
+
+        full_content = ""
+        async for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                full_content += delta.content
+                yield {"event": "token", "data": {"content": delta.content}}
+
+        yield {"event": "content_done", "data": {"full_content": full_content}}
 
     def _build_pinecone_filter(self, metadata_filters: dict[str, str]) -> dict | None:
         """Convert extracted metadata filters to Pinecone filter format."""

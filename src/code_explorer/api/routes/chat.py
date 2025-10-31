@@ -1,9 +1,11 @@
 """Chat API routes for RAG-based Q&A."""
 
+import json
 from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from code_explorer.api.middleware.auth import CurrentUser
@@ -122,6 +124,93 @@ async def chat(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An error occurred processing your request",
         )
+
+
+@router.post("/stream")
+async def chat_stream(
+    request: ChatRequest,
+    user: CurrentUser,
+    db: DbSessionDep,
+    chat_service: ChatService = Depends(get_chat_service),
+) -> StreamingResponse:
+    """Stream a chat response using Server-Sent Events."""
+    try:
+        repo_id = UUID(request.repo_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid repo_id format",
+        )
+
+    async def event_generator():
+        try:
+            # Run the retrieval pipeline (non-streaming part)
+            retrieval_result = await chat_service.query_retrieval(
+                db=db,
+                repo_id=repo_id,
+                user_id=user.user_id,
+                question=request.question,
+                model=request.model,
+                top_k=request.top_k,
+                history=request.history,
+            )
+
+            if retrieval_result["no_results"]:
+                no_result_msg = (
+                    "I couldn't find any relevant code to answer your question. "
+                    "Please make sure the repository has been indexed and try rephrasing your question."
+                )
+                yield f"event: token\ndata: {json.dumps({'content': no_result_msg})}\n\n"
+                yield f"event: done\ndata: {json.dumps({'sources': [], 'model': retrieval_result['model_name']})}\n\n"
+                return
+
+            # Stream the LLM generation
+            model_name = retrieval_result["model_name"]
+            full_content = ""
+
+            async for event in chat_service._stream_llm_response(
+                model=model_name,
+                system_prompt=retrieval_result["system_prompt"],
+                user_prompt=retrieval_result["user_prompt"],
+            ):
+                if event["event"] == "token":
+                    full_content += event["data"]["content"]
+                    yield f"event: token\ndata: {json.dumps(event['data'])}\n\n"
+                elif event["event"] == "content_done":
+                    full_content = event["data"]["full_content"]
+
+            # Extract citations and build final event
+            sources = chat_service._extract_citations(
+                full_content, retrieval_result["chunk_map"],
+            )
+            yield f"event: done\ndata: {json.dumps({'sources': [s.model_dump(mode='json') for s in sources], 'model': model_name})}\n\n"
+
+            # Save messages to history
+            user_message = ChatMessage(
+                repo_id=repo_id,
+                user_id=user.user_id,
+                role="user",
+                content=request.question,
+            )
+            assistant_message = ChatMessage(
+                repo_id=repo_id,
+                user_id=user.user_id,
+                role="assistant",
+                content=full_content,
+                sources=[s.model_dump(mode="json") for s in sources] if sources else None,
+            )
+            db.add(user_message)
+            db.add(assistant_message)
+            await db.commit()
+
+        except Exception as e:
+            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
 
 
 @router.get("/history/{repo_id}", response_model=ChatHistoryResponse)
