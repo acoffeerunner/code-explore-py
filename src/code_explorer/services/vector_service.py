@@ -124,6 +124,7 @@ class VectorService:
         namespace: str,
         vector: list[float],
         top_k: int = 15,
+        filter: dict | None = None,
     ) -> list[dict]:
         """
         Query Pinecone for similar vectors.
@@ -132,6 +133,7 @@ class VectorService:
             namespace: Pinecone namespace to query
             vector: Query embedding vector
             top_k: Number of results to return
+            filter: Optional Pinecone metadata filter
 
         Returns:
             List of matches with id, score, and metadata
@@ -140,12 +142,16 @@ class VectorService:
         await log.ainfo("Querying vectors")
 
         try:
-            results = self.index.query(
-                namespace=namespace,
-                vector=vector,
-                top_k=top_k,
-                include_metadata=True,
-            )
+            query_kwargs: dict = {
+                "namespace": namespace,
+                "vector": vector,
+                "top_k": top_k,
+                "include_metadata": True,
+            }
+            if filter is not None:
+                query_kwargs["filter"] = filter
+
+            results = self.index.query(**query_kwargs)
 
             matches = []
             for match in results.get("matches", []):

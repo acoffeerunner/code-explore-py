@@ -371,6 +371,64 @@ Be precise and concise. Explain code clearly."""
             logger.warning("Reranking failed, using original order", error=str(e))
             return chunks
 
+    def _reciprocal_rank_fusion(
+        self,
+        dense_results: list[dict],
+        sparse_results: list[dict],
+        k: int = 60,
+    ) -> list[dict]:
+        """Merge dense and sparse results using Reciprocal Rank Fusion.
+
+        score(doc) = sum(1 / (k + rank)) for each list containing the doc.
+        """
+        scores: dict[str, float] = {}
+        metadata: dict[str, dict] = {}
+
+        for rank, result in enumerate(dense_results):
+            doc_id = result["id"]
+            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
+            metadata[doc_id] = result
+
+        for rank, result in enumerate(sparse_results):
+            doc_id = result["id"]
+            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
+            if doc_id not in metadata:
+                metadata[doc_id] = result
+
+        merged = []
+        for doc_id, rrf_score in sorted(scores.items(), key=lambda x: x[1], reverse=True):
+            entry = {**metadata[doc_id], "rrf_score": rrf_score}
+            merged.append(entry)
+
+        return merged
+
+    async def _fts_search(
+        self,
+        db,
+        version_id,
+        keywords: list[str],
+        limit: int = 15,
+    ) -> list[dict]:
+        """Search chunks using Postgres full-text search."""
+        if not keywords:
+            return []
+
+        from sqlalchemy import text
+
+        result = await db.execute(
+            text(
+                "SELECT id, ts_rank(fts, plainto_tsquery('english', :query)) as score "
+                "FROM chunks "
+                "WHERE version_id = :version_id "
+                "AND fts @@ plainto_tsquery('english', :query) "
+                "ORDER BY score DESC "
+                "LIMIT :limit"
+            ),
+            {"query": " ".join(keywords), "version_id": version_id, "limit": limit},
+        )
+        rows = result.fetchall()
+        return [{"id": str(row.id), "score": float(row.score)} for row in rows]
+
     async def close(self) -> None:
         """Close the OpenAI client."""
         if self._client is not None:
