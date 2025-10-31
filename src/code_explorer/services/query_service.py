@@ -157,3 +157,53 @@ class QueryService:
                 break
 
         return filters
+
+    async def rewrite_with_history(
+        self,
+        question: str,
+        history: list[dict[str, str]],
+    ) -> str:
+        """Rewrite a follow-up question as a standalone query using chat history.
+
+        If history is empty or the LLM call fails, returns the original question.
+        """
+        if not history:
+            return question
+
+        try:
+            client = self._get_openai_client()
+
+            turns = getattr(self.settings, 'chat_history_turns', 5) if self.settings else 5
+            model = getattr(self.settings, 'hyde_model', 'gpt-4o-mini') if self.settings else 'gpt-4o-mini'
+
+            # Build a compact history summary
+            history_text = "\n".join(
+                f"{'User' if h['role'] == 'user' else 'Assistant'}: {h['content'][:200]}"
+                for h in history[-turns * 2:]
+            )
+
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Rewrite the user's follow-up question as a standalone question "
+                            "that incorporates context from the conversation history. "
+                            "Return ONLY the rewritten question, nothing else."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Conversation history:\n{history_text}\n\nFollow-up question: {question}",
+                    },
+                ],
+                max_completion_tokens=200,
+            )
+            result = response.choices[0].message.content
+            if result:
+                return result.strip()
+            return question
+        except Exception as e:
+            logger.warning("History rewrite failed, using original question", error=str(e))
+            return question

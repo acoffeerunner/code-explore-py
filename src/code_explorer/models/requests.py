@@ -69,6 +69,10 @@ class ChatRequest(BaseModel):
         le=50,
         description="Number of chunks to retrieve for context",
     )
+    history: list[dict[str, str]] | None = Field(
+        default=None,
+        description="Previous chat turns for context [{'role': 'user'|'assistant', 'content': '...'}]",
+    )
 
 
 class ReindexRequest(BaseModel):
