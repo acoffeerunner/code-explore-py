@@ -100,3 +100,6 @@ Thumbs.db
 
 # Git worktrees
 .worktrees/
+
+# verify skill evidence + state
+.verify-runs/
