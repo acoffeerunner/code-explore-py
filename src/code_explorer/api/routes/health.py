@@ -1,5 +1,6 @@
 """Health check API routes."""
 
+import asyncio
 from typing import Any
 
 import structlog
@@ -66,13 +67,14 @@ async def readiness_check() -> ReadinessResponse:
         logger.warning("Redis health check failed", error=str(e))
         checks["redis"] = "error"
 
-    # Check Pinecone (just verify client can be created)
+    # Check Pinecone
     try:
         from code_explorer.services.vector_service import VectorService
 
         vector_service = VectorService()
-        # Just access the client property to verify connection
-        _ = vector_service.client
+        await asyncio.to_thread(
+            vector_service.client.describe_index, vector_service.settings.pinecone_index_name
+        )
         checks["pinecone"] = "ok"
     except Exception as e:
         logger.warning("Pinecone health check failed", error=str(e))
