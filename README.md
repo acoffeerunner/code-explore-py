@@ -90,7 +90,7 @@ docker compose logs -f api worker
 |--------|----------|-------------|
 | GET | `/health` | Health check |
 | GET | `/health/ready` | Readiness probe |
-| GET | `/git/branches` | Discover branches for a Git URL |
+| POST | `/git/branches` | Discover branches for a Git URL |
 | POST | `/repos` | Create and index a repository |
 | GET | `/repos` | List user's repositories |
 | GET | `/repos/{id}` | Get repository details |
