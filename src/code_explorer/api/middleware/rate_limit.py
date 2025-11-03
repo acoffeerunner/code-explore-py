@@ -5,12 +5,27 @@ from typing import Callable
 
 import redis.asyncio as redis
 import structlog
-from fastapi import HTTPException, Request, Response, status
+from fastapi import Request, Response, status
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from code_explorer.config import Settings, get_settings
 
 logger = structlog.get_logger(__name__)
+
+
+def _rate_limited(limit: int, reset_at: int) -> JSONResponse:
+    # Returned, not raised: BaseHTTPMiddleware sits outside FastAPI's exception handlers.
+    return JSONResponse(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        content={"detail": "Rate limit exceeded. Please slow down."},
+        headers={
+            "Retry-After": str(max(0, reset_at - int(time.time()))),
+            "X-RateLimit-Limit": str(limit),
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Reset": str(reset_at),
+        },
+    )
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -124,16 +139,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         if not ip_allowed:
             logger.warning("IP rate limit exceeded", ip=client_ip)
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Rate limit exceeded. Please slow down.",
-                headers={
-                    "Retry-After": str(ip_reset - int(time.time())),
-                    "X-RateLimit-Limit": str(settings.rate_limit_per_ip),
-                    "X-RateLimit-Remaining": "0",
-                    "X-RateLimit-Reset": str(ip_reset),
-                },
-            )
+            return _rate_limited(settings.rate_limit_per_ip, ip_reset)
 
         # Check user-based rate limit if authenticated
         user_id = None
@@ -164,16 +170,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
             if not user_allowed:
                 logger.warning("User rate limit exceeded", user_id=user_id)
-                raise HTTPException(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail="Rate limit exceeded. Please slow down.",
-                    headers={
-                        "Retry-After": str(user_reset - int(time.time())),
-                        "X-RateLimit-Limit": str(settings.rate_limit_per_user),
-                        "X-RateLimit-Remaining": "0",
-                        "X-RateLimit-Reset": str(user_reset),
-                    },
-                )
+                return _rate_limited(settings.rate_limit_per_user, user_reset)
 
         # Process request
         response = await call_next(request)
