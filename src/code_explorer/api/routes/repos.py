@@ -20,6 +20,7 @@ from code_explorer.services.repo_service import (
     RepoNotFoundError,
     RepoService,
 )
+from code_explorer.utils.security import SSRFError
 
 logger = structlog.get_logger(__name__)
 
@@ -94,6 +95,10 @@ async def create_repo(
             status_code=status.HTTP_409_CONFLICT,
             detail="Repository with this URL and branch already exists",
         )
+
+    except SSRFError as e:
+        await log.awarning("Repository URL rejected", error=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
 
     except Exception as e:
         await log.aerror("Failed to create repository", error=str(e))

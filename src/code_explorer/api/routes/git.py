@@ -7,6 +7,7 @@ from code_explorer.api.middleware.auth import CurrentUser
 from code_explorer.models.requests import BranchesRequest
 from code_explorer.models.responses import BranchesResponse
 from code_explorer.services.git_service import GitService, RepoNotFoundError
+from code_explorer.utils.security import SSRFError
 
 logger = structlog.get_logger(__name__)
 
@@ -54,6 +55,10 @@ async def get_branches(
             is_public=False,
             error=str(e),
         )
+
+    except SSRFError as e:
+        await log.awarning("Repository URL rejected", error=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
 
     except Exception as e:
         await log.aerror("Failed to fetch branches", error=str(e))

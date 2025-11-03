@@ -11,7 +11,6 @@ import structlog
 from code_explorer.config import Settings, get_settings
 from code_explorer.utils.retry import TransientError, with_async_retry
 from code_explorer.utils.security import (
-    SSRFError,
     sanitize_branch_name,
     validate_git_url,
 )
@@ -73,11 +72,7 @@ class GitService:
             RepoNotFoundError: If repository is not accessible
             SSRFError: If URL targets internal resources
         """
-        # Validate URL for SSRF and host allowlist
-        try:
-            validated_url = validate_git_url(url, self.settings)
-        except SSRFError as e:
-            raise GitError(f"URL validation failed: {e}") from e
+        validated_url = validate_git_url(url, self.settings)
 
         log = logger.bind(url=validated_url)
         await log.ainfo("Fetching branches")
