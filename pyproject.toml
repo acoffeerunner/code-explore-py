@@ -43,6 +43,8 @@ dependencies = [
     "prometheus-client>=0.21.0",
     # Tokenization
     "tiktoken>=0.8.0",
+    # LLM Observability
+    "langsmith>=0.1.0",
 ]
 
 [project.optional-dependencies]
