@@ -12,6 +12,7 @@ FastAPI microservice for Git repository code indexing and RAG-based Q&A.
 - **Async Task Queue** - ARQ + Redis for background indexing jobs
 - **Webhook Notifications** - HMAC-signed callbacks for indexing status updates
 - **Observability** - Structured logging, OpenTelemetry tracing, Prometheus metrics
+- **LLM Ops** - LangSmith tracing for LLM calls, pipeline quality metrics logged to `query_logs`
 
 ## Requirements
 
@@ -148,6 +149,8 @@ See `.env.example` for all configuration options.
 - `OTLP_ENDPOINT` - OpenTelemetry collector endpoint
 - `RATE_LIMIT_PER_USER` - Requests per user per window (default: 100)
 - `RATE_LIMIT_PER_IP` - Requests per IP per window (default: 1000)
+- `LANGSMITH_API_KEY` - LangSmith API key for LLM tracing (disabled if empty)
+- `LANGSMITH_PROJECT` - LangSmith project name (default: code-explorer)
 
 ## Development
 
