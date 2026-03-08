@@ -8,6 +8,7 @@ import structlog
 from openai import AsyncOpenAI
 
 from code_explorer.config import Settings, get_settings
+from code_explorer.utils.langsmith_utils import create_openai_client
 
 logger = structlog.get_logger(__name__)
 
@@ -60,8 +61,8 @@ class QueryService:
 
     def _get_openai_client(self) -> AsyncOpenAI:
         if self._client is None:
-            self._client = AsyncOpenAI(
-                api_key=self.settings.openai_api_key.get_secret_value(),
+            self._client = create_openai_client(
+                self.settings.openai_api_key.get_secret_value(), self.settings,
             )
         return self._client
 

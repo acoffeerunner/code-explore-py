@@ -7,6 +7,7 @@ import structlog
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, RateLimitError
 
 from code_explorer.config import Settings, get_settings
+from code_explorer.utils.langsmith_utils import create_openai_client
 from code_explorer.utils.retry import with_async_retry
 
 logger = structlog.get_logger(__name__)
@@ -32,10 +33,10 @@ class EmbeddingService:
 
     @property
     def client(self) -> AsyncOpenAI:
-        """Get or create OpenAI client."""
+        """Get or create OpenAI client (with optional LangSmith wrapping)."""
         if self._client is None:
-            self._client = AsyncOpenAI(
-                api_key=self.settings.openai_api_key.get_secret_value(),
+            self._client = create_openai_client(
+                self.settings.openai_api_key.get_secret_value(), self.settings,
             )
         return self._client
 

@@ -15,10 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from code_explorer.config import Settings, get_settings
 from code_explorer.models.db import Chunk, IndexVersion, Repo
 from code_explorer.models.domain import RetrievedChunk, SourceCitation, TokenUsage
+from code_explorer.models.metrics import PipelineMetrics
 from code_explorer.models.responses import ChatResponse
 from code_explorer.services.embedding_service import EmbeddingService
 from code_explorer.services.query_service import QueryService
 from code_explorer.services.vector_service import VectorService
+from code_explorer.utils.langsmith_utils import create_openai_client
 
 logger = structlog.get_logger(__name__)
 
@@ -52,10 +54,10 @@ class ChatService:
 
     @property
     def client(self) -> AsyncOpenAI:
-        """Get or create OpenAI client."""
+        """Get or create OpenAI client (with optional LangSmith wrapping)."""
         if self._client is None:
-            self._client = AsyncOpenAI(
-                api_key=self.settings.openai_api_key.get_secret_value(),
+            self._client = create_openai_client(
+                self.settings.openai_api_key.get_secret_value(), self.settings,
             )
         return self._client
 
@@ -73,6 +75,8 @@ class ChatService:
         """Run the retrieval pipeline and return prompts + chunk_map for streaming or sync use."""
         log = logger.bind(repo_id=str(repo_id), question_length=len(question))
         await log.ainfo("Processing chat query (retrieval phase)")
+
+        metrics = PipelineMetrics()
 
         # Step 1: Verify ownership and get repo
         result = await db.execute(select(Repo).where(Repo.id == repo_id, Repo.user_id == user_id))
@@ -100,7 +104,11 @@ class ChatService:
         if history:
             t0 = time.perf_counter()
             effective_question = await self.query_svc.rewrite_with_history(question, history)
-            await log.ainfo("History rewrite complete", duration_ms=round((time.perf_counter() - t0) * 1000), rewritten=effective_question[:100])
+            ms = round((time.perf_counter() - t0) * 1000)
+            metrics.history_rewrite_used = True
+            metrics.latency_history_rewrite_ms = ms
+            await log.ainfo("History rewrite complete", duration_ms=ms, rewritten=effective_question[:100])
+        metrics.effective_question = effective_question if effective_question != question else None
 
         # Step 3: Keyword + metadata extraction
         keywords = self.query_svc.extract_keywords(effective_question)
@@ -112,46 +120,59 @@ class ChatService:
         if self.settings.hyde_enabled:
             t0 = time.perf_counter()
             embed_text = await self.query_svc.generate_hyde(effective_question)
-            await log.ainfo("HyDE generation complete", duration_ms=round((time.perf_counter() - t0) * 1000))
+            ms = round((time.perf_counter() - t0) * 1000)
+            metrics.hyde_used = True
+            metrics.latency_hyde_ms = ms
+            await log.ainfo("HyDE generation complete", duration_ms=ms)
 
         # Step 5: Dense search (Pinecone with metadata filters)
         t0 = time.perf_counter()
         question_embedding = await self.embedding.embed_single(embed_text)
-        await log.ainfo("Embedding complete", duration_ms=round((time.perf_counter() - t0) * 1000))
+        metrics.latency_embedding_ms = round((time.perf_counter() - t0) * 1000)
+        await log.ainfo("Embedding complete", duration_ms=metrics.latency_embedding_ms)
 
         pinecone_filter = self._build_pinecone_filter(metadata_filters)
         t0 = time.perf_counter()
         dense_matches = await self.vector.query(
             namespace=namespace, vector=question_embedding, top_k=top_k, filter=pinecone_filter,
         )
-        dense_ms = round((time.perf_counter() - t0) * 1000)
+        metrics.latency_dense_search_ms = round((time.perf_counter() - t0) * 1000)
+        metrics.dense_result_count = len(dense_matches)
+        if dense_matches:
+            metrics.top_dense_score = dense_matches[0].get("score", 0.0)
 
         # Step 6: Sparse search (Postgres FTS with extracted keywords)
         t0 = time.perf_counter()
         sparse_matches = await self._fts_search(db, version.id, keywords, limit=top_k)
-        sparse_ms = round((time.perf_counter() - t0) * 1000)
+        metrics.latency_sparse_search_ms = round((time.perf_counter() - t0) * 1000)
+        metrics.sparse_result_count = len(sparse_matches)
 
         # Step 7: RRF fusion
         merged = self._reciprocal_rank_fusion(dense_matches, sparse_matches)
+        metrics.merged_result_count = len(merged)
+        if merged:
+            metrics.top_rrf_score = merged[0].get("rrf_score", 0.0)
         await log.ainfo(
             "Search complete",
             dense_count=len(dense_matches),
             sparse_count=len(sparse_matches),
             merged_count=len(merged),
-            dense_ms=dense_ms,
-            sparse_ms=sparse_ms,
+            dense_ms=metrics.latency_dense_search_ms,
+            sparse_ms=metrics.latency_sparse_search_ms,
         )
 
         model_name = model or self.settings.default_chat_model
 
         if not merged:
             await log.ainfo("No relevant chunks found")
+            metrics.no_results = True
             return {
                 "system_prompt": "",
                 "user_prompt": "",
                 "chunk_map": {},
                 "model_name": model_name,
                 "no_results": True,
+                "metrics": metrics,
             }
 
         # Step 8: Fetch chunk content from Postgres
@@ -182,17 +203,22 @@ class ChatService:
         retrieved_chunks = self._apply_score_threshold(
             retrieved_chunks, min_score=self.settings.min_similarity_score
         )
+        metrics.post_threshold_count = len(retrieved_chunks)
 
         # Step 10: Parent chunk expansion
         t0 = time.perf_counter()
         parent_chunks = await self._fetch_parent_chunks(db, retrieved_chunks, version.id)
+        metrics.parent_chunks_added = len(parent_chunks)
         await log.ainfo("Parent expansion complete", duration_ms=round((time.perf_counter() - t0) * 1000), parent_count=len(parent_chunks))
 
         # Step 11: LLM reranking (if enabled)
         if self.settings.reranker_enabled:
             t0 = time.perf_counter()
             retrieved_chunks = await self._rerank_chunks(retrieved_chunks, effective_question)
-            await log.ainfo("Reranking complete", duration_ms=round((time.perf_counter() - t0) * 1000))
+            ms = round((time.perf_counter() - t0) * 1000)
+            metrics.reranker_used = True
+            metrics.latency_rerank_ms = ms
+            await log.ainfo("Reranking complete", duration_ms=ms)
 
         # Step 12: Build context with tiktoken
         context, chunk_map = self._build_context(retrieved_chunks)
@@ -216,6 +242,7 @@ class ChatService:
             "chunk_map": chunk_map,
             "model_name": model_name,
             "no_results": False,
+            "metrics": metrics,
         }
 
     @traceable(name="rag_query", run_type="chain")
