@@ -106,6 +106,53 @@ CREATE INDEX IF NOT EXISTS idx_deliveries_status ON public.webhook_deliveries(st
 CREATE INDEX IF NOT EXISTS idx_deliveries_next_retry ON public.webhook_deliveries(next_retry_at)
     WHERE status = 'pending';
 
+-- query_logs table (RAGOps quality signals per query)
+CREATE TABLE IF NOT EXISTS public.query_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    repo_id UUID NOT NULL REFERENCES public.repos(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL,
+    question TEXT NOT NULL,
+    effective_question TEXT,
+
+    -- Retrieval signals
+    dense_result_count INTEGER NOT NULL,
+    sparse_result_count INTEGER NOT NULL,
+    merged_result_count INTEGER NOT NULL,
+    post_threshold_count INTEGER NOT NULL,
+    parent_chunks_added INTEGER NOT NULL DEFAULT 0,
+    top_dense_score FLOAT,
+    top_rrf_score FLOAT,
+    no_results BOOLEAN NOT NULL DEFAULT FALSE,
+
+    -- Generation signals
+    model TEXT NOT NULL,
+    citation_count INTEGER NOT NULL DEFAULT 0,
+    answer_length INTEGER NOT NULL,
+    prompt_tokens INTEGER NOT NULL,
+    completion_tokens INTEGER NOT NULL,
+
+    -- Pipeline flags
+    hyde_used BOOLEAN NOT NULL DEFAULT FALSE,
+    reranker_used BOOLEAN NOT NULL DEFAULT FALSE,
+    history_rewrite_used BOOLEAN NOT NULL DEFAULT FALSE,
+
+    -- Latency breakdown (milliseconds)
+    latency_history_rewrite_ms INTEGER,
+    latency_hyde_ms INTEGER,
+    latency_embedding_ms INTEGER,
+    latency_dense_search_ms INTEGER,
+    latency_sparse_search_ms INTEGER,
+    latency_rerank_ms INTEGER,
+    latency_llm_ms INTEGER,
+    latency_total_ms INTEGER NOT NULL,
+
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Indexes for query_logs
+CREATE INDEX IF NOT EXISTS idx_query_logs_repo ON public.query_logs(repo_id);
+CREATE INDEX IF NOT EXISTS idx_query_logs_created ON public.query_logs(created_at);
+
 -- =============================================================================
 -- AUTO-UPDATE TIMESTAMP TRIGGER
 -- =============================================================================
@@ -135,6 +182,7 @@ ALTER TABLE public.repos ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.index_versions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.chunks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.webhook_deliveries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.query_logs ENABLE ROW LEVEL SECURITY;
 
 -- Drop existing policies if they exist (for idempotency)
 DROP POLICY IF EXISTS "Users can view own repos" ON public.repos;
@@ -144,6 +192,7 @@ DROP POLICY IF EXISTS "Users can delete own repos" ON public.repos;
 DROP POLICY IF EXISTS "Users can access own index_versions" ON public.index_versions;
 DROP POLICY IF EXISTS "Users can access own chunks" ON public.chunks;
 DROP POLICY IF EXISTS "Users can access own webhook_deliveries" ON public.webhook_deliveries;
+DROP POLICY IF EXISTS "Users can access own query_logs" ON public.query_logs;
 
 -- Policies for repos table
 CREATE POLICY "Users can view own repos" ON public.repos
@@ -176,6 +225,10 @@ CREATE POLICY "Users can access own webhook_deliveries" ON public.webhook_delive
         repo_id IN (SELECT id FROM public.repos WHERE user_id = auth.uid())
     );
 
+-- Policies for query_logs (user can only see their own query logs)
+CREATE POLICY "Users can access own query_logs" ON public.query_logs
+    FOR ALL USING (user_id = auth.uid());
+
 -- =============================================================================
 -- SERVICE ROLE BYPASS
 -- =============================================================================
@@ -198,6 +251,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.repos TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.index_versions TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.chunks TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.webhook_deliveries TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.query_logs TO authenticated;
 
 -- Grant sequence usage for UUID generation
 GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO authenticated;
