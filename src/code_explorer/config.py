@@ -119,6 +119,18 @@ class Settings(BaseSettings):
     ]
 
     # ==========================================================================
+    # LangSmith Configuration
+    # ==========================================================================
+    langsmith_api_key: Annotated[
+        SecretStr | None,
+        Field(default=None, description="LangSmith API key (enables tracing when set)"),
+    ]
+    langsmith_project: Annotated[
+        str,
+        Field(default="code-explorer", description="LangSmith project name"),
+    ]
+
+    # ==========================================================================
     # Git Configuration
     # ==========================================================================
     git_clone_timeout: Annotated[
