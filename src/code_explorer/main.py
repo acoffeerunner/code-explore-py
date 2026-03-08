@@ -41,6 +41,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Startup
     await log.ainfo("Starting Code Explorer API", version="0.1.0")
 
+    # Initialize LangSmith tracing (if configured)
+    if settings.langsmith_api_key:
+        import os
+
+        os.environ["LANGCHAIN_TRACING_V2"] = "true"
+        os.environ["LANGCHAIN_API_KEY"] = settings.langsmith_api_key.get_secret_value()
+        os.environ["LANGCHAIN_PROJECT"] = settings.langsmith_project
+        await log.ainfo("LangSmith tracing enabled", project=settings.langsmith_project)
+
     # Initialize database connection pool
     _ = get_engine(settings)
     await log.ainfo("Database connection pool initialized")
