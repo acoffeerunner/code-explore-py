@@ -4,6 +4,7 @@ import hashlib
 from typing import Any
 
 import structlog
+import tiktoken
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, RateLimitError
 
 from code_explorer.config import Settings, get_settings
@@ -14,6 +15,8 @@ logger = structlog.get_logger(__name__)
 
 # Maximum texts per embedding request (OpenAI limit is 2048)
 MAX_BATCH_SIZE = 2048
+# Maximum tokens per embedding request (OpenAI limit is 300k)
+MAX_BATCH_TOKENS = 250_000
 
 
 class EmbeddingError(Exception):
@@ -30,6 +33,7 @@ class EmbeddingService:
         self.settings = settings or get_settings()
         self._client: AsyncOpenAI | None = None
         self._cache: dict[str, list[float]] = {}  # In-memory cache by content hash
+        self._tokenizer = tiktoken.get_encoding("cl100k_base")
 
     @property
     def client(self) -> AsyncOpenAI:
@@ -109,10 +113,9 @@ class EmbeddingService:
         if cache_hits > 0:
             await log.ainfo("Cache hits", hits=cache_hits)
 
-        # Batch embed remaining texts
+        # Batch embed remaining texts (respecting both count and token limits)
         if texts_to_embed:
-            for batch_start in range(0, len(texts_to_embed), MAX_BATCH_SIZE):
-                batch = texts_to_embed[batch_start : batch_start + MAX_BATCH_SIZE]
+            for batch in self._make_token_aware_batches(texts_to_embed):
                 batch_texts = [t[1] for t in batch]
 
                 try:
@@ -126,7 +129,7 @@ class EmbeddingService:
                             self._cache[cache_key] = embedding
 
                 except Exception as e:
-                    await log.aerror("Embedding batch failed", error=str(e))
+                    await log.aerror("Embedding batch failed", error=str(e), text_count=len(batch))
                     raise EmbeddingError(f"Failed to generate embeddings: {e}") from e
 
         await log.ainfo("Embeddings generated", total=len(texts), cached=cache_hits)
@@ -187,6 +190,34 @@ class EmbeddingService:
         parts.append(content)
 
         return "\n".join(parts)
+
+    def _make_token_aware_batches(
+        self,
+        items: list[tuple[int, str]],
+    ) -> list[list[tuple[int, str]]]:
+        """Split items into batches respecting both count and token limits."""
+        batches: list[list[tuple[int, str]]] = []
+        current_batch: list[tuple[int, str]] = []
+        current_tokens = 0
+
+        for item in items:
+            text_tokens = len(self._tokenizer.encode(item[1]))
+
+            if current_batch and (
+                len(current_batch) >= MAX_BATCH_SIZE
+                or current_tokens + text_tokens > MAX_BATCH_TOKENS
+            ):
+                batches.append(current_batch)
+                current_batch = []
+                current_tokens = 0
+
+            current_batch.append(item)
+            current_tokens += text_tokens
+
+        if current_batch:
+            batches.append(current_batch)
+
+        return batches
 
     def clear_cache(self) -> None:
         """Clear the embedding cache."""
