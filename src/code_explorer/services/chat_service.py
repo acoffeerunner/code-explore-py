@@ -257,11 +257,21 @@ class ChatService:
         history: list[dict[str, str]] | None = None,
     ) -> ChatResponse:
         """Answer a question about code using the enhanced RAG pipeline."""
+        t_total = time.perf_counter()
+
         retrieval = await self.query_retrieval(
             db, repo_id, user_id, question, model, top_k, history,
         )
+        metrics: PipelineMetrics = retrieval["metrics"]
 
         if retrieval["no_results"]:
+            total_ms = round((time.perf_counter() - t_total) * 1000)
+            await self._log_query(
+                db, repo_id, user_id, question, metrics,
+                model=retrieval["model_name"], answer_length=0,
+                citation_count=0, prompt_tokens=0, completion_tokens=0,
+                latency_llm_ms=None, latency_total_ms=total_ms,
+            )
             return ChatResponse(
                 answer="I couldn't find any relevant code to answer your question. "
                 "Please make sure the repository has been indexed and try rephrasing your question.",
@@ -273,6 +283,7 @@ class ChatService:
         log = logger.bind(repo_id=str(repo_id))
         await log.ainfo("Calling LLM", model=retrieval["model_name"])
 
+        t_llm = time.perf_counter()
         response = await self.client.chat.completions.create(
             model=retrieval["model_name"],
             messages=[
@@ -281,6 +292,7 @@ class ChatService:
             ],
             max_completion_tokens=4000,
         )
+        llm_ms = round((time.perf_counter() - t_llm) * 1000)
 
         answer = response.choices[0].message.content or ""
         usage = TokenUsage(
@@ -290,6 +302,16 @@ class ChatService:
         )
 
         sources = self._extract_citations(answer, retrieval["chunk_map"])
+        total_ms = round((time.perf_counter() - t_total) * 1000)
+
+        await self._log_query(
+            db, repo_id, user_id, question, metrics,
+            model=retrieval["model_name"], answer_length=len(answer),
+            citation_count=len(sources),
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            latency_llm_ms=llm_ms, latency_total_ms=total_ms,
+        )
 
         await log.ainfo(
             "Chat query completed",
@@ -622,6 +644,87 @@ Be precise and concise. Explain code clearly."""
         )
         rows = result.fetchall()
         return [{"id": str(row.id), "score": float(row.score)} for row in rows]
+
+    async def _log_query(
+        self,
+        db: AsyncSession,
+        repo_id: UUID,
+        user_id: UUID,
+        question: str,
+        metrics: PipelineMetrics,
+        model: str,
+        answer_length: int,
+        citation_count: int,
+        prompt_tokens: int,
+        completion_tokens: int,
+        latency_llm_ms: int | None,
+        latency_total_ms: int,
+    ) -> None:
+        """Persist pipeline quality signals to query_logs (fire-and-forget)."""
+        from sqlalchemy import text
+
+        try:
+            await db.execute(
+                text(
+                    "INSERT INTO query_logs ("
+                    "  repo_id, user_id, question, effective_question,"
+                    "  dense_result_count, sparse_result_count, merged_result_count,"
+                    "  post_threshold_count, parent_chunks_added,"
+                    "  top_dense_score, top_rrf_score, no_results,"
+                    "  model, citation_count, answer_length,"
+                    "  prompt_tokens, completion_tokens,"
+                    "  hyde_used, reranker_used, history_rewrite_used,"
+                    "  latency_history_rewrite_ms, latency_hyde_ms,"
+                    "  latency_embedding_ms, latency_dense_search_ms,"
+                    "  latency_sparse_search_ms, latency_rerank_ms,"
+                    "  latency_llm_ms, latency_total_ms"
+                    ") VALUES ("
+                    "  :repo_id, :user_id, :question, :effective_question,"
+                    "  :dense_result_count, :sparse_result_count, :merged_result_count,"
+                    "  :post_threshold_count, :parent_chunks_added,"
+                    "  :top_dense_score, :top_rrf_score, :no_results,"
+                    "  :model, :citation_count, :answer_length,"
+                    "  :prompt_tokens, :completion_tokens,"
+                    "  :hyde_used, :reranker_used, :history_rewrite_used,"
+                    "  :latency_history_rewrite_ms, :latency_hyde_ms,"
+                    "  :latency_embedding_ms, :latency_dense_search_ms,"
+                    "  :latency_sparse_search_ms, :latency_rerank_ms,"
+                    "  :latency_llm_ms, :latency_total_ms"
+                    ")"
+                ),
+                {
+                    "repo_id": repo_id,
+                    "user_id": user_id,
+                    "question": question,
+                    "effective_question": metrics.effective_question,
+                    "dense_result_count": metrics.dense_result_count,
+                    "sparse_result_count": metrics.sparse_result_count,
+                    "merged_result_count": metrics.merged_result_count,
+                    "post_threshold_count": metrics.post_threshold_count,
+                    "parent_chunks_added": metrics.parent_chunks_added,
+                    "top_dense_score": metrics.top_dense_score,
+                    "top_rrf_score": metrics.top_rrf_score,
+                    "no_results": metrics.no_results,
+                    "model": model,
+                    "citation_count": citation_count,
+                    "answer_length": answer_length,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "hyde_used": metrics.hyde_used,
+                    "reranker_used": metrics.reranker_used,
+                    "history_rewrite_used": metrics.history_rewrite_used,
+                    "latency_history_rewrite_ms": metrics.latency_history_rewrite_ms,
+                    "latency_hyde_ms": metrics.latency_hyde_ms,
+                    "latency_embedding_ms": metrics.latency_embedding_ms,
+                    "latency_dense_search_ms": metrics.latency_dense_search_ms,
+                    "latency_sparse_search_ms": metrics.latency_sparse_search_ms,
+                    "latency_rerank_ms": metrics.latency_rerank_ms,
+                    "latency_llm_ms": latency_llm_ms,
+                    "latency_total_ms": latency_total_ms,
+                },
+            )
+        except Exception as e:
+            await logger.awarning("Failed to log query metrics", error=str(e))
 
     async def close(self) -> None:
         """Close the OpenAI client."""

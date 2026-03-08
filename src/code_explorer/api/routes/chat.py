@@ -1,6 +1,7 @@
 """Chat API routes for RAG-based Q&A."""
 
 import json
+import time
 from uuid import UUID
 
 import structlog
@@ -144,6 +145,8 @@ async def chat_stream(
 
     async def event_generator():
         try:
+            t_total = time.perf_counter()
+
             # Run the retrieval pipeline (non-streaming part)
             retrieval_result = await chat_service.query_retrieval(
                 db=db,
@@ -154,6 +157,7 @@ async def chat_stream(
                 top_k=request.top_k,
                 history=request.history,
             )
+            metrics = retrieval_result["metrics"]
 
             if retrieval_result["no_results"]:
                 no_result_msg = (
@@ -162,12 +166,20 @@ async def chat_stream(
                 )
                 yield f"event: token\ndata: {json.dumps({'content': no_result_msg})}\n\n"
                 yield f"event: done\ndata: {json.dumps({'sources': [], 'model': retrieval_result['model_name']})}\n\n"
+                total_ms = round((time.perf_counter() - t_total) * 1000)
+                await chat_service._log_query(
+                    db, repo_id, user.user_id, request.question, metrics,
+                    model=retrieval_result["model_name"], answer_length=0,
+                    citation_count=0, prompt_tokens=0, completion_tokens=0,
+                    latency_llm_ms=None, latency_total_ms=total_ms,
+                )
                 return
 
             # Stream the LLM generation
             model_name = retrieval_result["model_name"]
             full_content = ""
 
+            t_llm = time.perf_counter()
             async for event in chat_service._stream_llm_response(
                 model=model_name,
                 system_prompt=retrieval_result["system_prompt"],
@@ -178,6 +190,7 @@ async def chat_stream(
                     yield f"event: token\ndata: {json.dumps(event['data'])}\n\n"
                 elif event["event"] == "content_done":
                     full_content = event["data"]["full_content"]
+            llm_ms = round((time.perf_counter() - t_llm) * 1000)
 
             # Extract citations and build final event
             sources = chat_service._extract_citations(
@@ -201,6 +214,17 @@ async def chat_stream(
             )
             db.add(user_message)
             db.add(assistant_message)
+
+            # Log query metrics (prompt_tokens/completion_tokens=0: streaming doesn't return usage by default)
+            total_ms = round((time.perf_counter() - t_total) * 1000)
+            await chat_service._log_query(
+                db, repo_id, user.user_id, request.question, metrics,
+                model=model_name, answer_length=len(full_content),
+                citation_count=len(sources),
+                prompt_tokens=0, completion_tokens=0,
+                latency_llm_ms=llm_ms, latency_total_ms=total_ms,
+            )
+
             await db.commit()
 
         except Exception as e:
