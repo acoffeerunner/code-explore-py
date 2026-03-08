@@ -7,6 +7,7 @@ from uuid import UUID
 
 import structlog
 import tiktoken
+from langsmith import traceable
 from openai import AsyncOpenAI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,6 +59,7 @@ class ChatService:
             )
         return self._client
 
+    @traceable(name="rag_retrieval", run_type="chain")
     async def query_retrieval(
         self,
         db: AsyncSession,
@@ -216,6 +218,7 @@ class ChatService:
             "no_results": False,
         }
 
+    @traceable(name="rag_query", run_type="chain")
     async def query(
         self,
         db: AsyncSession,
