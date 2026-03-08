@@ -103,7 +103,7 @@ class VectorService:
                 {
                     "id": vec_id,
                     "values": embedding,
-                    "metadata": metadata.model_dump(),
+                    "metadata": metadata.model_dump(exclude_none=True),
                 }
                 for vec_id, embedding, metadata in batch
             ]
