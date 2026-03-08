@@ -83,7 +83,7 @@ class Settings(BaseSettings):
     ]
     embedding_dimensions: Annotated[
         int,
-        Field(default=1536, description="Embedding vector dimensions"),
+        Field(default=3072, description="Embedding vector dimensions"),
     ]
     default_chat_model: Annotated[
         str,
