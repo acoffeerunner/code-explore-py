@@ -6,6 +6,7 @@ from code_explorer.config import Settings
 def test_langsmith_defaults():
     """LangSmith settings default to disabled (no API key)."""
     settings = Settings(
+        _env_file=None,
         supabase_url="https://test.supabase.co",
         supabase_anon_key="test-anon-key",
         supabase_service_role_key="test-service-key",
@@ -23,6 +24,7 @@ def test_langsmith_from_env(monkeypatch):
     monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_test_key")
     monkeypatch.setenv("LANGSMITH_PROJECT", "my-project")
     settings = Settings(
+        _env_file=None,
         supabase_url="https://test.supabase.co",
         supabase_anon_key="test-anon-key",
         supabase_service_role_key="test-service-key",

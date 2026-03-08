@@ -8,6 +8,7 @@ from code_explorer.config import Settings
 def test_default_rag_settings():
     """New RAG settings have correct defaults."""
     settings = Settings(
+        _env_file=None,
         supabase_url="https://test.supabase.co",
         supabase_anon_key="test-anon-key",
         supabase_service_role_key="test-service-key",
@@ -31,6 +32,7 @@ def test_rag_settings_from_env(monkeypatch):
     monkeypatch.setenv("MIN_SIMILARITY_SCORE", "0.5")
     monkeypatch.setenv("CHAT_HISTORY_TURNS", "3")
     settings = Settings(
+        _env_file=None,
         supabase_url="https://test.supabase.co",
         supabase_anon_key="test-anon-key",
         supabase_service_role_key="test-service-key",
