@@ -185,10 +185,13 @@ class ChatService:
             chunk_id = UUID(match["id"])
             if chunk_id in db_chunks:
                 db_chunk = db_chunks[chunk_id]
+                # Use the original dense cosine score for threshold filtering;
+                # RRF scores (~0.01-0.03) are not on the same scale.
+                dense_score = match.get("score", 0.0)
                 retrieved_chunks.append(
                     RetrievedChunk(
                         chunk_id=chunk_id,
-                        score=match.get("rrf_score", match.get("score", 0.0)),
+                        score=dense_score,
                         file_path=db_chunk.file_path,
                         start_line=db_chunk.start_line,
                         end_line=db_chunk.end_line,
@@ -199,7 +202,7 @@ class ChatService:
                     )
                 )
 
-        # Step 9: Score threshold filtering
+        # Step 9: Score threshold filtering (uses dense cosine score, not RRF score)
         retrieved_chunks = self._apply_score_threshold(
             retrieved_chunks, min_score=self.settings.min_similarity_score
         )
