@@ -27,7 +27,7 @@ logger = structlog.get_logger(__name__)
 # Maximum context window size in tokens
 MAX_CONTEXT_TOKENS = 12_000
 # Minimum chunks to keep even if below score threshold
-MIN_RESULTS_FLOOR = 3
+MIN_RESULTS_FLOOR = 10
 
 
 class ChatError(Exception):
