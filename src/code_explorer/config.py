@@ -111,7 +111,7 @@ class Settings(BaseSettings):
     ]
     min_similarity_score: Annotated[
         float,
-        Field(default=0.3, ge=0.0, le=1.0, description="Minimum vector similarity threshold"),
+        Field(default=0.15, ge=0.0, le=1.0, description="Minimum vector similarity threshold"),
     ]
     chat_history_turns: Annotated[
         int,

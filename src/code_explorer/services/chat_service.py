@@ -26,6 +26,8 @@ logger = structlog.get_logger(__name__)
 
 # Maximum context window size in tokens
 MAX_CONTEXT_TOKENS = 12_000
+# Minimum chunks to keep even if below score threshold
+MIN_RESULTS_FLOOR = 3
 
 
 class ChatError(Exception):
@@ -203,9 +205,14 @@ class ChatService:
                 )
 
         # Step 9: Score threshold filtering (uses dense cosine score, not RRF score)
+        # Keep at least MIN_RESULTS_FLOOR chunks even if below threshold, so the
+        # user never gets an empty answer when Pinecone returned matches.
+        pre_filter = list(retrieved_chunks)
         retrieved_chunks = self._apply_score_threshold(
             retrieved_chunks, min_score=self.settings.min_similarity_score
         )
+        if len(retrieved_chunks) < MIN_RESULTS_FLOOR and pre_filter:
+            retrieved_chunks = sorted(pre_filter, key=lambda c: c.score, reverse=True)[:MIN_RESULTS_FLOOR]
         metrics.post_threshold_count = len(retrieved_chunks)
 
         # Step 10: Parent chunk expansion

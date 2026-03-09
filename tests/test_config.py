@@ -21,7 +21,7 @@ def test_default_rag_settings():
     assert settings.hyde_model == "gpt-4o-mini"
     assert settings.hyde_enabled is True
     assert settings.reranker_enabled is True
-    assert settings.min_similarity_score == 0.3
+    assert settings.min_similarity_score == 0.15
     assert settings.chat_history_turns == 5
 
 
